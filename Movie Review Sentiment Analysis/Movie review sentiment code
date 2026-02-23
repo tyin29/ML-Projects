@@ -1,0 +1,120 @@
+---
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#install.packages("text2vec")
+#install.packages("slam")
+#install.packages("crayon")
+library(text2vec)
+library(slam)
+library(crayon)
+library(glmnet)
+```
+
+Before building models and making a prediction, we first pre-process the data and construct our customized vocabulary.   
+
+```{r}
+all = read.table("alldata.tsv",stringsAsFactors = F,header = T)
+all = all[,c("id","sentiment","review")]
+all$review = gsub('<.*?>', ' ', all$review)
+```
+
+First, we stem, tokenize, and vectorize each review to create a Document Term matrix (maximum 4-grams), and we use the default vocabulary size (namely the number of columns of dtm_train) more than 30000, which is bigger than the sample size 25000.  
+
+Specifically, we remove the common words, such as “i”, “me”, “my”, “myself”, which do not contain substantive meanings from the reviews. We also remove special symbols such as brackets and punctuations from the reviews.     
+
+```{r}
+stop_words = c("i", "me", "my", "myself", 
+               "we", "our", "ours", "ourselves", 
+               "you", "your", "yours", 
+               "their", "they", "his", "her", 
+               "she", "he", "a", "an", "and",
+               "is", "was", "are", "were", 
+               "him", "himself", "has", "have", 
+               "it", "its", "the", "us")
+```
+
+Then we use the itoken() function in the text2vec library to convert all review texts into lower cases and conduct tokenization by specifying tokenizer to be word tokenizer. 
+
+```{r}
+it_all = itoken(all$review,
+                  preprocessor = tolower, 
+                  tokenizer = word_tokenizer)
+```
+
+Next, we filter and only include terms with at least 1 word and at most 4 words. Those terms should appear at least 10 times across the movie reviews, and they also should account for at least 0.1 percent and at most 50 percent of the reviews. 
+
+```{r}
+tmp.vocab = create_vocabulary(it_all, 
+                              stopwords = stop_words, 
+                              ngram = c(1L,4L))
+
+tmp.vocab = prune_vocabulary(tmp.vocab, term_count_min = 10,
+                             doc_proportion_max = 0.5,
+                             doc_proportion_min = 0.001)
+```
+
+Last, we vectorize texts and use it to create a DT matrix.
+
+```{r}
+dtm_all  = create_dtm(it_all, vocab_vectorizer(tmp.vocab))
+```
+
+Second, we use Lasso (with logistic regression) to trim the vocabulary size to 1000. Using the glmnet() function, we get an output that contains 100 sets of estimated beta values corresponding to 100 different lambda values.
+
+```{r}
+set.seed(1360)
+tmpfit = glmnet(x = dtm_all, 
+                y = all$sentiment, 
+                alpha = 1,
+                family='binomial')
+```
+
+Specifically, tmpfit$df tells us the number of non-zero beta values (namely the df) for each of the 100 estimates.
+
+```{r}
+tmpfit$df
+```
+
+```{r}
+# Also try to filter out a vocab with words that we can interpret by using the two-sample t-test due to the difficulty of explaining some terms. The words are finally orderder by the magnitude of their t-statistics and top 2000 words are picked, which are then divided into two lists: positive words and negative words.
+
+# v.size = dim(dtm_all)[2]
+# yall = all$sentiment
+# 
+# summ = matrix(0, nrow=v.size, ncol=4)
+# summ[,1] = colapply_simple_triplet_matrix(as.simple_triplet_matrix(dtm_all[yall==1, ]),mean)
+# summ[,2] = colapply_simple_triplet_matrix(as.simple_triplet_matrix(dtm_all[yall==1, ]),var)
+# summ[,3] = colapply_simple_triplet_matrix(as.simple_triplet_matrix(dtm_all[yall==0, ]),mean)
+# summ[,4] = colapply_simple_triplet_matrix(as.simple_triplet_matrix(dtm_all[yall==0, ]),var)
+# n1=sum(yall); 
+# n=length(yall)
+# n0= n - n1
+# 
+# myp = (summ[,1] - summ[,3])/
+#   sqrt(summ[,2]/n1 + summ[,4]/n0)
+# words = colnames(dtm_all)
+# id = order(abs(myp), decreasing=TRUE)[1:2000]
+# pos.list = words[id[myp[id]>0]]
+# neg.list = words[id[myp[id]<0]]
+
+# pos.list[1:30] top 30 positive terms
+# neg.list[1:30] top 30 negative terms
+```
+
+We choose the largest df among those less than 1000, which shows the 36th column with 976 non-zero term coefficients and 976 terms, and store the corresponding words in myvocab. A word here actually means a term, which could be a phrase involving multiple words, such as “do_not_watch_this” or “lost_interest”.  
+
+```{r}
+dfmax = max(which(tmpfit$df < 1000))
+dfmax
+myvocab = colnames(dtm_all)[which(tmpfit$beta[, dfmax] != 0)]
+length(myvocab) # there are 976 terms in the vocabulary
+myvocab[1:50] # the first 50 terms in the vocabulary
+
+write(myvocab, file = "myvocab.txt", sep = '\t')
+```
